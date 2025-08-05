@@ -6,7 +6,6 @@
 #define MAX_N_WORDS 8192
 
 #include <stddef.h>
-
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -324,13 +323,11 @@ static inline uint32_t scale_range(uint32_t code)
     return (uint32_t) ((((double) code - code_min) * n_buckets) / code_range);
 }
 
-#define GOLDEN_RATIO_PRIME_32 0x9e370001UL
 /* Must keep an an alphabetic order when assiging buckets. */
 static int hash_bucket(void *key, hash_t *hash, uint32_t *bkt)
 {
     uint32_t code = get_code((char *) key);
-    *hash = (hash_t) code;
-    *bkt = scale_range(code);
+    *hash = (hash_t) code, *bkt = scale_range(code);
     // *bkt = (GOLDEN_RATIO_PRIME_32 * code) % n_buckets;
     return 0;
 }
@@ -438,12 +435,11 @@ int wc_merge_results(uint32_t tid, uint32_t n_threads)
         wk_bend += n_buckets % n_workers;
 
     for (size_t i = 0; i < n_threads; i++) {
+        struct wc_cache *cache = &thread_caches[i];
         for (size_t j = wk_bstart; j < wk_bend; j++) {
             /* Traverse the buckets of all threads from wk_bstart to wk_bend.
              * Aggregate the nodes of theses buckets in the main_cache.
              */
-
-            struct wc_cache *cache = &thread_caches[i];
             __merge_results(tid, j, cache);
         }
     }
