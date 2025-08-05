@@ -1,4 +1,7 @@
-/* Word cache configs */
+#define _GNU_SOURCE
+#include <sched.h>
+#include <unistd.h>
+
 #define MAX_WORD_SIZE 32
 #define MAX_N_WORDS 8192
 
@@ -43,6 +46,36 @@ static inline void hlist_add_head(struct hlist_node *n, struct hlist_head *h)
     h->first = n;
     n->pprev = &h->first;
 }
+
+/**
+ * hlist_add_before - add a new entry before the one specified
+ * @n: new entry to be added
+ * @next: hlist node to add it before, which must be non-NULL
+ */
+static inline void hlist_add_before(struct hlist_node *n,
+				    struct hlist_node *next)
+{
+	n->pprev = next->pprev;
+	n->next = next;
+	next->pprev = &n->next;
+	*(n->pprev) = n;
+}
+
+/**
+ * hlist_add_behind - add a new entry after the one specified
+ * @n: new entry to be added
+ * @prev: hlist node to add it after, which must be non-NULL
+ */
+static inline void hlist_add_behind(struct hlist_node *n,
+				    struct hlist_node *prev)
+{
+	n->next = prev->next;
+	prev->next = n;
+	n->pprev = &prev->next;
+	if (n->next)
+		n->next->pprev = &n->next;
+}
+
 
 #include <stdbool.h>
 
@@ -136,13 +169,9 @@ static inline struct ht_node *ht_find(struct htable *h, void *key)
     struct hlist_head *head = &h->buckets[bkt];
     struct ht_node *n;
     hlist_for_each_entry (n, head, list) {
-        if (n->hash == hval) {
-            int res = h->cmp(n, key);
-            if (!res)
-                return n;
-            if (res > 0)
-                return NULL;
-        }
+        if (n->hash == hval && !h->cmp(n, key))
+            return n;
+
     }
     return NULL;
 }
@@ -150,7 +179,6 @@ static inline struct ht_node *ht_find(struct htable *h, void *key)
 /* Insert a new element with the key 'key' in the htable.
  * Return 0 if success.
  */
-#include <stdio.h>
 
 static inline int ht_insert(struct htable *h, struct ht_node *n, void *key)
 {
@@ -158,24 +186,28 @@ static inline int ht_insert(struct htable *h, struct ht_node *n, void *key)
     uint32_t bkt;
     h->hashfunc(key, &hval, &bkt);
     n->hash = hval;
-
     struct hlist_head *head = &h->buckets[bkt];
-    struct hlist_node *iter;
+    struct hlist_node *iter, *tail = NULL;
     hlist_for_each(iter, head)
     {
         struct ht_node *tmp = hlist_entry(iter, struct ht_node, list);
+        tail = iter;
         if (tmp->hash >= hval) {
             int cmp = h->cmp(tmp, key);
             if (!cmp) /* already exist */
                 return -1;
             if (cmp > 0) {
-                hlist_add_head(&n->list, head);
+                hlist_add_before(&n->list, iter);
                 return 0;
             }
         }
+        
     }
 
-    hlist_add_head(&n->list, head);
+    if (!tail)
+        hlist_add_head(&n->list, head);
+    else
+        hlist_add_behind(&n->list, tail);
     return 0;
 }
 
@@ -289,14 +321,17 @@ static inline int scale_range_init()
 
 static inline uint32_t scale_range(uint32_t code)
 {
-    return (uint32_t)((((double) code - code_min) * n_buckets) / code_range);
+    return (uint32_t) ((((double) code - code_min) * n_buckets) / code_range);
 }
 
+#define GOLDEN_RATIO_PRIME_32 0x9e370001UL
 /* Must keep an an alphabetic order when assiging buckets. */
 static int hash_bucket(void *key, hash_t *hash, uint32_t *bkt)
 {
     uint32_t code = get_code((char *) key);
-    *hash = (hash_t) code, *bkt = scale_range(code);
+    *hash = (hash_t) code;
+    *bkt = scale_range(code);
+    // *bkt = (GOLDEN_RATIO_PRIME_32 * code) % n_buckets;
     return 0;
 }
 
@@ -403,11 +438,12 @@ int wc_merge_results(uint32_t tid, uint32_t n_threads)
         wk_bend += n_buckets % n_workers;
 
     for (size_t i = 0; i < n_threads; i++) {
-        struct wc_cache *cache = &thread_caches[i];
         for (size_t j = wk_bstart; j < wk_bend; j++) {
             /* Traverse the buckets of all threads from wk_bstart to wk_bend.
              * Aggregate the nodes of theses buckets in the main_cache.
              */
+
+            struct wc_cache *cache = &thread_caches[i];
             __merge_results(tid, j, cache);
         }
     }
@@ -746,9 +782,20 @@ static int buff_read(uint32_t tid, char **buff, off_t *size, char *last)
     return 0;
 }
 
+void set_affinity(int tid)
+{
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(tid % sysconf(_SC_NPROCESSORS_ONLN), &cpuset);  // tid core
+    if (sched_setaffinity(0, sizeof(cpu_set_t), &cpuset) != 0) {
+        perror("sched_setaffinity");
+    }
+}
+
 void *mr_map(void *id)
 {
     uint32_t tid = ((struct thread_info *) id)->thread_num;
+    set_affinity(tid);
     int ret = buff_init(tid);
     if (ret)
         goto bail;
